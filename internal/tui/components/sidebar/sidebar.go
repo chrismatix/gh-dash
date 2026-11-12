@@ -96,6 +96,25 @@ func (m Model) View() string {
 	))
 }
 
+// ViewPane renders content that sizes and scrolls itself, so it skips the viewport and pager.
+func (m Model) ViewPane(content string, focused bool) string {
+	style := m.ctx.Styles.Sidebar.Root.Height(m.ctx.MainContentHeight)
+	if m.ctx.PreviewPosition == "bottom" {
+		style = m.ctx.Styles.Sidebar.BottomRoot.Height(m.ctx.DynamicPreviewHeight)
+	}
+	if focused {
+		style = style.BorderForeground(m.ctx.Theme.PrimaryText)
+	}
+	return style.Width(m.ctx.DynamicPreviewWidth).Render(content)
+}
+
+func (m *Model) PaneSize() (width, height int) {
+	if m.ctx.PreviewPosition == "bottom" {
+		return m.ctx.DynamicPreviewWidth, m.ctx.DynamicPreviewHeight - m.ctx.Styles.Sidebar.BorderWidth
+	}
+	return m.GetSidebarContentWidth(), m.ctx.MainContentHeight
+}
+
 func (m *Model) SetContent(data string) {
 	m.data = data
 	m.viewport.SetContent(data)

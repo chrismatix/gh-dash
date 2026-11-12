@@ -38,6 +38,7 @@ import (
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prrow"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prssection"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prview"
+	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/prypane"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/reposection"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/section"
 	"github.com/dlvhdr/gh-dash/v4/internal/tui/components/sidebar"
@@ -54,6 +55,7 @@ type Model struct {
 	keys             *keys.KeyMap
 	sidebar          sidebar.Model
 	prView           prview.Model
+	pry              prypane.Model
 	issueSidebar     issueview.Model
 	branchSidebar    branchsidebar.Model
 	notificationView notificationview.Model
@@ -88,6 +90,7 @@ func NewModel(location config.Location, repos Repositories) Model {
 	m := Model{
 		keys:        keys.Keys,
 		sidebar:     sidebar.NewModel(),
+		pry:         prypane.NewModel(),
 		taskSpinner: taskSpinner,
 		tasks:       map[string]context.Task{},
 	}
@@ -184,7 +187,7 @@ func (m *Model) initScreen() tea.Msg {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, m.initScreen)
+	return tea.Batch(tea.RequestBackgroundColor, m.initScreen, m.pry.Listen())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -199,6 +202,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		currSection     = m.getCurrSection()
 		currRowData     = m.getCurrRowData()
 	)
+
+	if cmd, ok := m.pry.Update(msg); ok {
+		return m, cmd
+	}
+	if paste, ok := msg.(tea.PasteMsg); ok && m.pry.Focused {
+		m.pry.Paste(paste.Content)
+		return m, nil
+	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -221,6 +232,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.issueSidebar, cmd, _ = m.issueSidebar.Update(msg)
 			m.syncSidebar()
 			return m, cmd
+		}
+
+		if m.pry.Focused {
+			if press, ok := msg.(tea.KeyPressMsg); ok {
+				if press.String() == "esc" {
+					m.pry.Blur(press)
+				} else {
+					m.pry.SendKey(press)
+				}
+			}
+			return m, nil
+		}
+
+		if msg.String() == "enter" && m.showsPry() {
+			m.pry.Focus()
+			return m, nil
 		}
 
 		if m.footer.ShowConfirmQuit && (msg.String() == "y" || msg.String() == "enter") {
@@ -968,18 +995,22 @@ func (m *Model) View() tea.View {
 	s.WriteString("\n")
 	var content string
 	currSection := m.getCurrSection()
+	sidebarView := m.sidebar.View()
+	if m.showsPry() {
+		sidebarView = m.sidebar.ViewPane(m.pry.View(), m.pry.Focused)
+	}
 	if currSection != nil {
 		if m.ctx.PreviewPosition == "bottom" && m.sidebar.IsOpen {
 			content = lipgloss.JoinVertical(
 				lipgloss.Left,
 				m.getCurrSection().View(),
-				m.sidebar.View(),
+				sidebarView,
 			)
 		} else {
 			content = lipgloss.JoinHorizontal(
 				lipgloss.Top,
 				m.getCurrSection().View(),
-				m.sidebar.View(),
+				sidebarView,
 			)
 		}
 	} else {
@@ -1276,6 +1307,12 @@ func (m *Model) promptConfirmation(currSection section.Section, action string) t
 	return nil
 }
 
+func (m *Model) showsPry() bool {
+	_, isPR := m.getCurrRowData().(*prrow.Data)
+	// The built-in input boxes (comment, approve, ...) still render in the old preview.
+	return isPR && m.sidebar.IsOpen && m.ctx.View == config.PRsView && !m.prView.IsTextInputBoxFocused()
+}
+
 func (m *Model) syncSidebar() tea.Cmd {
 	if !m.sidebar.IsOpen {
 		return nil
@@ -1295,6 +1332,12 @@ func (m *Model) syncSidebar() tea.Cmd {
 		cmd = m.branchSidebar.SetRow(&row)
 		m.sidebar.SetContent(m.branchSidebar.View())
 	case *prrow.Data:
+		if m.showsPry() {
+			repoPath, _ := common.GetRepoLocalPath(row.GetRepoNameWithOwner(), m.ctx.Config.RepoPaths)
+			paneWidth, paneHeight := m.sidebar.PaneSize()
+			m.pry.Open(repoPath, row.GetRepoNameWithOwner(), row.Primary.Number, paneWidth, paneHeight)
+			break
+		}
 		m.prView.SetSectionId(m.currSectionId)
 		m.prView.SetRow(row)
 		m.prView.SetWidth(width)
