@@ -3,6 +3,7 @@
 package prypane
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,10 @@ type (
 	startMsg  struct{ generation int }
 	outputMsg struct{}
 	exitedMsg struct{ generation int }
+	diffMsg   struct {
+		generation int
+		command    string
+	}
 )
 
 type launch struct {
@@ -68,6 +73,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Cmd, bool) {
 			m.running = false
 			m.Focused = false
 			_, _ = m.emulator.Write([]byte("\r\n\x1b[2m[gh pry exited, enter to reopen]\x1b[m"))
+		}
+	case diffMsg:
+		if msg.generation == m.generation {
+			diff := exec.Command("sh", "-c", msg.command)
+			diff.Dir = m.process.Dir
+			return tea.Batch(m.Listen(), tea.ExecProcess(diff, nil)), true
 		}
 	case outputMsg:
 	default:
@@ -132,16 +143,32 @@ func (m *Model) start() {
 	if _, err := os.Stat(process.Dir); process.Dir == "" || err != nil {
 		process.Dir, _ = os.UserHomeDir()
 	}
-	process.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	// gh pry writes its diff command to fd 3 instead of opening hunk inside the pane.
+	diffReader, diffWriter, err := os.Pipe()
+	if err != nil {
+		_, _ = m.emulator.Write([]byte(fmt.Sprintf("could not start gh pry: %v", err)))
+		return
+	}
+	process.ExtraFiles = []*os.File{diffWriter}
+	process.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor", "GH_PRY_DIFF_FD=3")
 
 	terminal, err := pty.StartWithSize(process, &pty.Winsize{Rows: uint16(m.height), Cols: uint16(m.width)})
+	_ = diffWriter.Close()
 	if err != nil {
+		_ = diffReader.Close()
 		_, _ = m.emulator.Write([]byte(fmt.Sprintf("could not start gh pry: %v", err)))
 		return
 	}
 	m.process, m.terminal, m.running = process, terminal, true
 
 	emulator, events, generation := m.emulator, m.events, m.generation
+	go func() {
+		defer diffReader.Close()
+		lines := bufio.NewScanner(diffReader)
+		for lines.Scan() {
+			events <- diffMsg{generation, lines.Text()}
+		}
+	}()
 	go func() { _, _ = io.Copy(terminal, emulator) }()
 	go func() {
 		buffer := make([]byte, 32*1024)
